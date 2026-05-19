@@ -16,7 +16,7 @@ hard-coded.
 Usage:
     python eval/run_eval.py
     python eval/run_eval.py --corpus path/to/custom.jsonl
-    python eval/run_eval.py --grader {heuristic,llm,both}
+    python eval/run_eval.py --grader {heuristic,llm,both,codex}
     python eval/run_eval.py --grader-corpus path/to/grader.jsonl
 
 Exit codes:
@@ -619,9 +619,12 @@ def main(argv=None):
     )
     parser.add_argument(
         "--grader",
-        choices=["heuristic", "llm", "both"],
+        choices=["heuristic", "llm", "both", "codex"],
         default="heuristic",
-        help="Which grader to evaluate: heuristic (default), llm, or both.",
+        help="Which grader to evaluate: heuristic (default), llm, both, or "
+             "codex. 'codex' drives the cross-model CodexGrader via the local "
+             "Codex CLI (evaluation only; requires the Codex CLI installed and "
+             "authenticated; never auto-selected; not used in CI).",
     )
     args = parser.parse_args(argv)
 
@@ -638,7 +641,7 @@ def main(argv=None):
         sys.path.insert(0, str(_REPO_ROOT))
 
     from provenance.verify import verify_text
-    from provenance.grade import HeuristicGrader, LLMGrader
+    from provenance.grade import HeuristicGrader, LLMGrader, CodexGrader
 
     grader = HeuristicGrader()
 
@@ -693,6 +696,9 @@ def main(argv=None):
                 # For --grader llm with no key, run heuristic as fallback.
                 graders_to_run.append((HeuristicGrader(), "HeuristicGrader"))
             # For --grader both, heuristic is already added above; no second block needed.
+
+    if args.grader == "codex":
+        graders_to_run.append((CodexGrader(), "CodexGrader(codex-cli)"))
 
     for grader_instance, grader_label in graders_to_run:
         results = grade_grader_corpus(grader_items, grader_instance)

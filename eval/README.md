@@ -286,3 +286,44 @@ interpreted and communicated. They are stated without softening.
    confusion matrix. A large change in any per-class metric warrants checking
    whether the new items inadvertently favour or disfavour the grader being
    measured.
+
+---
+
+## Addendum: the Codex cross-model backend (`--grader codex`)
+
+The shipped `LLMGrader` calls the Anthropic Messages API directly and
+therefore requires `ANTHROPIC_API_KEY`. To measure the headline question
+without provisioning a key, the harness adds a third grader backend,
+`CodexGrader`, selected with `python eval/run_eval.py --grader codex`.
+
+What it is. `CodexGrader` drives the local Codex CLI (`codex exec`) as a
+separate, read-only, ephemeral subprocess. It is fed the exact same system
+prompt, claim, source, and citation that `LLMGrader` uses, and is constrained
+to the same JSON verdict schema via `--output-schema`. The no-source classes
+(`unverifiable`, `skipped`) are decided deterministically, identical to
+`HeuristicGrader`, so no Codex call is spent on them and the comparison is on
+identical ground. It is never auto-selected by `get_grader()`, is never
+reachable from the hook, and is not run in CI.
+
+Why it strengthens the result. Because the prompt, inputs, and verdict
+schema are held constant and only the model changes, a Codex run is a clean
+same-task different-model comparison. If a different vendor's model recovers
+the `contradicted` class that the token-overlap heuristic gets zero on, the
+finding is shown to be structural to token overlap and general across models,
+not an artefact of one provider.
+
+Honesty caveats (in addition to the four guardrails above).
+
+1. Codex output is model-dependent and not bit-reproducible. The model is
+   whatever the local Codex CLI is configured and authenticated to use; the
+   harness labels the grader `codex-cli` and does not assert a fixed model.
+2. This requires the Codex CLI installed and authenticated. If it is absent
+   or unauthenticated, every source-bearing item returns verdict `error`;
+   the harness still exits 0 and the confusion matrix shows the `error`
+   column. An all-`error` run is a tooling failure, not a finding, and must
+   be reported as such.
+3. The Codex run measures the finding's generality, not the exact shipped
+   `LLMGrader`. The keyed Anthropic run remains the only measurement of the
+   artefact exactly as published, and stays optional.
+4. `CodexGrader.grade()` never raises: any failure (binary missing, non-zero
+   exit, timeout, schema or JSON failure) maps to verdict `error`.

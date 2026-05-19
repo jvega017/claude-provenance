@@ -14,6 +14,7 @@ import unittest.mock
 from unittest.mock import MagicMock, patch
 
 from provenance.grade import (
+    CodexGrader,
     HeuristicGrader,
     LLMGrader,
     Verdict,
@@ -225,6 +226,76 @@ class TestGetGrader(unittest.TestCase):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
             grader = get_grader()
         self.assertIsInstance(grader, HeuristicGrader)
+
+
+class TestCodexGraderNoSource(unittest.TestCase):
+    """CodexGrader is deterministic and spawns no subprocess without a source.
+
+    These items match HeuristicGrader exactly so the two graders are compared
+    on identical ground for the no-source classes.
+    """
+
+    def setUp(self):
+        self.g = CodexGrader()
+
+    def test_citation_without_source_is_unverifiable(self):
+        v = self.g.grade("A claim.", None, "https://example.gov.au/x")
+        self.assertEqual(v.verdict, "unverifiable")
+        self.assertEqual(v.grader, "codex-cli")
+
+    def test_no_citation_no_source_is_skipped(self):
+        v = self.g.grade("A claim.", None, None)
+        self.assertEqual(v.verdict, "skipped")
+        self.assertEqual(v.grader, "codex-cli")
+
+
+class TestCodexGraderGracefulFailure(unittest.TestCase):
+    """CodexGrader degrades to verdict 'error' and never raises when the
+    Codex CLI is absent. No real Codex invocation occurs in this test.
+    """
+
+    def setUp(self):
+        self._saved = os.environ.get("PROVENANCE_CODEX_BIN")
+        # Point the grader at a binary that cannot exist.
+        os.environ["PROVENANCE_CODEX_BIN"] = "codex_definitely_not_a_real_binary_zzz"
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("PROVENANCE_CODEX_BIN", None)
+        else:
+            os.environ["PROVENANCE_CODEX_BIN"] = self._saved
+
+    def test_missing_binary_yields_error_verdict(self):
+        v = CodexGrader().grade(
+            "Spending rose 10 per cent in 2022.",
+            "Spending fell 10 per cent in 2022.",
+            None,
+        )
+        self.assertEqual(v.verdict, "error")
+        self.assertEqual(v.grader, "codex-cli")
+        self.assertIsInstance(v.rationale, str)
+
+    def test_grade_never_raises(self):
+        try:
+            CodexGrader().grade("A claim with a source.", "Some source text.", None)
+        except Exception as exc:  # pragma: no cover - failure path
+            self.fail("CodexGrader.grade raised: %r" % exc)
+
+
+class TestCodexGraderJSONExtraction(unittest.TestCase):
+    """The tolerant JSON extractor handles clean and prose-wrapped output."""
+
+    def test_clean_json(self):
+        out = CodexGrader._extract_json('{"verdict": "verified", "confidence": 0.9, "rationale": "ok"}')
+        self.assertEqual(out["verdict"], "verified")
+
+    def test_prose_wrapped_json(self):
+        raw = 'Here is the result:\n{"verdict": "contradicted", "confidence": 0.8, "rationale": "opposite"}\nDone.'
+        out = CodexGrader._extract_json(raw)
+        self.assertEqual(out["verdict"], "contradicted")
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(CodexGrader._extract_json("no json here at all"))
 
 
 if __name__ == "__main__":
