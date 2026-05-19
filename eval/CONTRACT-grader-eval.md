@@ -209,3 +209,27 @@ The README must state plainly, without softening:
    bit-for-bit. The associated paper, *From Citation to Epistemic
    Governance*, stays described as in preparation. Do not claim stars,
    adoption, or benchmark status the project does not hold.
+
+---
+
+## Addendum (post-freeze, 2026-05-19): Codex cross-model backend
+
+The frozen contract above governed the original three-agent fan-out, which is
+complete. A later, separately authorised increment added a third grader
+backend, `CodexGrader`, and extended the CLI to
+`--grader {heuristic,llm,both,codex}`. This addendum records that drift so the
+spec stays self-consistent; it does not retro-edit the frozen sections.
+
+- `provenance/grade.py` gains `CodexGrader`: drives `codex exec` (read-only,
+  ephemeral) with the SAME `_SYSTEM_PROMPT`, `_build_user_message` and
+  `_VALID_VERDICTS` as `LLMGrader`. Same task, same inputs, same schema, one
+  variable changed: the model. No-source classes decided deterministically,
+  identical to `HeuristicGrader`.
+- `get_grader()` is unchanged: `CodexGrader` is never auto-selected; it is an
+  evaluation-only backend, never reachable from the hook, never run in CI.
+- All section 1 invariants still hold: the hook is untouched and pure stdlib;
+  the package stays stdlib-only (subprocess, tempfile, json, os, re); no
+  third-party imports; Australian English; no em dashes.
+- Honesty: a Codex run measures the finding's cross-model generality, not the
+  exact shipped `LLMGrader`. The keyed Anthropic run remains the only
+  measurement of the artefact as published, and stays optional.
