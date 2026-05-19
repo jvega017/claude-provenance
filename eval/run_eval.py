@@ -6,23 +6,31 @@ axis-2 verifier (provenance.verify.verify_text with fetch=False) against a
 hand-labelled seed corpus.  Computes precision, recall and F1 for the
 heuristic's "unsupported" detection and counts axis-2 category distribution.
 
+Also evaluates the grader (HeuristicGrader or LLMGrader) against a separate
+grader corpus (eval/corpus/grader.jsonl) and reports per-class precision,
+recall, F1, macro averages, overall accuracy, and a full confusion matrix.
+
 All computation happens at runtime against real gold labels. No metrics are
 hard-coded.
 
 Usage:
     python eval/run_eval.py
     python eval/run_eval.py --corpus path/to/custom.jsonl
+    python eval/run_eval.py --grader {heuristic,llm,both}
+    python eval/run_eval.py --grader-corpus path/to/grader.jsonl
 
 Exit codes:
     0  -- evaluation completed (even when metrics are low)
     1  -- corpus file missing or malformed
 
-Python 3.8+. Standard library only. No network access.
+Python 3.8+. Standard library only. No network access (except LLMGrader when
+ANTHROPIC_API_KEY is set).
 """
 
 import argparse
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -322,8 +330,278 @@ def print_report(axis1_metrics, axis1_confusion, axis2_gold_counts,
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Grader corpus loading
 # ---------------------------------------------------------------------------
+
+_VALID_GRADER_GOLD = {"verified", "contradicted", "not_addressed", "unverifiable", "skipped"}
+
+
+def load_grader_corpus(path) -> list:
+    """Parse eval/corpus/grader.jsonl. SystemExit(1) on missing file,
+    malformed JSON, empty file, missing required field (id, claim, gold),
+    gold not in the 5-class set, duplicate id, or citation/source not
+    (str or None).
+    """
+    p = Path(path)
+    if not p.is_file():
+        sys.stderr.write("ERROR: grader corpus file not found: %s\n" % path)
+        sys.exit(1)
+
+    items = []
+    seen_ids = set()
+    try:
+        raw_text = p.read_text(encoding="utf-8")
+    except Exception as exc:
+        sys.stderr.write("ERROR: could not read grader corpus: %s\n" % exc)
+        sys.exit(1)
+
+    lines = raw_text.splitlines()
+    non_empty = [ln.strip() for ln in lines if ln.strip()]
+    if not non_empty:
+        sys.stderr.write("ERROR: grader corpus file is empty\n")
+        sys.exit(1)
+
+    for lineno, raw in enumerate(lines, 1):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            sys.stderr.write(
+                "ERROR: grader corpus line %d is not valid JSON: %s\n" % (lineno, exc)
+            )
+            sys.exit(1)
+
+        # Required fields.
+        for field in ("id", "claim", "gold"):
+            if field not in obj:
+                sys.stderr.write(
+                    "ERROR: grader corpus line %d missing required field %r\n"
+                    % (lineno, field)
+                )
+                sys.exit(1)
+
+        # Gold class validation.
+        if obj["gold"] not in _VALID_GRADER_GOLD:
+            sys.stderr.write(
+                "ERROR: grader corpus line %d: gold value %r not in %s\n"
+                % (lineno, obj["gold"], sorted(_VALID_GRADER_GOLD))
+            )
+            sys.exit(1)
+
+        # Duplicate id check.
+        item_id = obj["id"]
+        if item_id in seen_ids:
+            sys.stderr.write(
+                "ERROR: grader corpus line %d: duplicate id %r\n" % (lineno, item_id)
+            )
+            sys.exit(1)
+        seen_ids.add(item_id)
+
+        # citation and source must be str or None (absent also counts as None).
+        for field in ("citation", "source"):
+            val = obj.get(field, None)
+            if val is not None and not isinstance(val, str):
+                sys.stderr.write(
+                    "ERROR: grader corpus line %d: field %r must be a string or null, "
+                    "got %r\n" % (lineno, field, type(val).__name__)
+                )
+                sys.exit(1)
+
+        items.append(obj)
+
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Grader evaluation
+# ---------------------------------------------------------------------------
+
+def grade_grader_corpus(items, grader) -> list:
+    """Return list of (id, gold, pred) tuples. pred is the
+    Verdict.verdict string from grader.grade(claim, source, citation).
+    """
+    results = []
+    for item in items:
+        claim = item["claim"]
+        # JSON null maps to Python None.
+        src = item.get("source", None)
+        cit = item.get("citation", None)
+        try:
+            verdict = grader.grade(claim, src, cit)
+            pred = verdict.verdict
+        except Exception:
+            pred = "error"
+        results.append((item["id"], item["gold"], pred))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Grader metric computation
+# ---------------------------------------------------------------------------
+
+def compute_grader_metrics(results) -> dict:
+    """results is the list from grade_grader_corpus. Returns a dict:
+       {
+         "per_class": { cls: {"tp":int,"fp":int,"fn":int,
+                              "precision":float,"recall":float,
+                              "f1":float,"support":int} for cls in 5 gold classes },
+         "macro": {"precision":float,"recall":float,"f1":float},
+         "accuracy": float,
+         "confusion": { (gold,pred): int },   # pred may be 'error'
+         "n": int
+       }
+    One-vs-rest per class: TP gold==c and pred==c; FP gold!=c and pred==c;
+    FN gold==c and pred!=c. precision/recall/f1 = 0.0 when denominator 0.
+    macro = unweighted mean over the 5 gold classes. accuracy = exact-match
+    correct / n. All values computed at runtime; nothing hard-coded.
+    """
+    gold_classes = list(_VALID_GRADER_GOLD)  # the 5 canonical gold classes
+    n = len(results)
+
+    # Build confusion matrix and per-class counters.
+    confusion = {}
+    per_class = {c: {"tp": 0, "fp": 0, "fn": 0, "support": 0} for c in gold_classes}
+
+    for _id, gold, pred in results:
+        key = (gold, pred)
+        confusion[key] = confusion.get(key, 0) + 1
+        if gold in per_class:
+            per_class[gold]["support"] += 1
+        for c in gold_classes:
+            is_gold_c = (gold == c)
+            is_pred_c = (pred == c)
+            if is_gold_c and is_pred_c:
+                per_class[c]["tp"] += 1
+            elif (not is_gold_c) and is_pred_c:
+                per_class[c]["fp"] += 1
+            elif is_gold_c and (not is_pred_c):
+                per_class[c]["fn"] += 1
+
+    # Compute precision / recall / F1 per class.
+    for c in gold_classes:
+        d = per_class[c]
+        tp, fp, fn = d["tp"], d["fp"], d["fn"]
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+        d["precision"] = precision
+        d["recall"] = recall
+        d["f1"] = f1
+
+    # Macro averages (unweighted over the 5 gold classes).
+    macro_precision = sum(per_class[c]["precision"] for c in gold_classes) / len(gold_classes)
+    macro_recall = sum(per_class[c]["recall"] for c in gold_classes) / len(gold_classes)
+    macro_f1 = sum(per_class[c]["f1"] for c in gold_classes) / len(gold_classes)
+
+    # Overall accuracy.
+    correct = sum(1 for _id, gold, pred in results if gold == pred)
+    accuracy = correct / n if n > 0 else 0.0
+
+    return {
+        "per_class": per_class,
+        "macro": {
+            "precision": macro_precision,
+            "recall": macro_recall,
+            "f1": macro_f1,
+        },
+        "accuracy": accuracy,
+        "confusion": confusion,
+        "n": n,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Grader report printing
+# ---------------------------------------------------------------------------
+
+# Ordered list of gold classes for display (matches contract section 3).
+_GRADER_CLASS_ORDER = [
+    "verified",
+    "contradicted",
+    "not_addressed",
+    "unverifiable",
+    "skipped",
+]
+
+# Predicted labels include all gold labels plus 'error'.
+_GRADER_PRED_ORDER = _GRADER_CLASS_ORDER + ["error"]
+
+
+def print_grader_report(metrics, grader_label, n_items) -> None:
+    """Print the grader report to stdout. Markers in section 6 are mandatory."""
+    print(_WIDE_SEP)
+    print("GRADER EVALUATION")
+    print(_WIDE_SEP)
+    print()
+    print("Grader: %s" % grader_label)
+    print("Corpus: %d items" % n_items)
+    print()
+
+    # Per-class precision / recall / F1.
+    print(_SEP)
+    print("per-class precision / recall / F1")
+    print(_SEP)
+    hdr = "  %-16s  %9s  %9s  %9s  %9s" % ("class", "precision", "recall", "F1", "support")
+    print(hdr)
+    for c in _GRADER_CLASS_ORDER:
+        d = metrics["per_class"][c]
+        print(
+            "  %-16s  %9.4f  %9.4f  %9.4f  %9d"
+            % (c, d["precision"], d["recall"], d["f1"], d["support"])
+        )
+    print()
+
+    # Macro averages.
+    m = metrics["macro"]
+    print(_SEP)
+    print("macro-avg")
+    print(_SEP)
+    print("  %-16s  %9.4f  %9.4f  %9.4f" % ("macro-avg", m["precision"], m["recall"], m["f1"]))
+    print()
+
+    # Overall accuracy.
+    print(_SEP)
+    print("overall accuracy")
+    print(_SEP)
+    print("  accuracy: %.4f  (%d / %d)" % (metrics["accuracy"], round(metrics["accuracy"] * metrics["n"]), metrics["n"]))
+    print()
+
+    # Confusion matrix (rows = gold, cols = predicted).
+    print(_SEP)
+    print("confusion matrix (rows = gold, cols = predicted)")
+    print(_SEP)
+    # Header row.
+    col_w = 14
+    header = "  %-16s" % "gold \\ pred"
+    for pred_lbl in _GRADER_PRED_ORDER:
+        header += ("  %-" + str(col_w) + "s") % pred_lbl
+    print(header)
+    for gold_lbl in _GRADER_CLASS_ORDER:
+        row = "  %-16s" % gold_lbl
+        for pred_lbl in _GRADER_PRED_ORDER:
+            cnt = metrics["confusion"].get((gold_lbl, pred_lbl), 0)
+            row += ("  %-" + str(col_w) + "d") % cnt
+        print(row)
+    print()
+
+    # Caveat block: all three substrings required by contract section 6.
+    print(_SEP)
+    print(
+        "NOTE: This evaluation is not a benchmark. Numbers are corpus-dependent\n"
+        "and should not be quoted as general accuracy.\n"
+        "Sources used are synthetic, self-contained sources that isolate grader\n"
+        "reasoning from fetch reliability, which is a separate unmeasured axis.\n"
+        "The HeuristicGrader cannot emit 'contradicted'; expect mislabelling on\n"
+        "that gold block as a structural finding, not a defect."
+    )
+    print(_WIDE_SEP)
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -333,6 +611,17 @@ def main(argv=None):
         "--corpus",
         default=str(_REPO_ROOT / "eval" / "corpus" / "seed.jsonl"),
         help="Path to the JSONL corpus file (default: eval/corpus/seed.jsonl).",
+    )
+    parser.add_argument(
+        "--grader-corpus",
+        default=str(_REPO_ROOT / "eval" / "corpus" / "grader.jsonl"),
+        help="Path to the grader JSONL corpus file (default: eval/corpus/grader.jsonl).",
+    )
+    parser.add_argument(
+        "--grader",
+        choices=["heuristic", "llm", "both"],
+        default="heuristic",
+        help="Which grader to evaluate: heuristic (default), llm, or both.",
     )
     args = parser.parse_args(argv)
 
@@ -349,11 +638,11 @@ def main(argv=None):
         sys.path.insert(0, str(_REPO_ROOT))
 
     from provenance.verify import verify_text
-    from provenance.grade import HeuristicGrader
+    from provenance.grade import HeuristicGrader, LLMGrader
 
     grader = HeuristicGrader()
 
-    # Evaluate each item.
+    # Evaluate each seed item.
     all_axis1 = []
     all_axis2 = []
 
@@ -370,7 +659,7 @@ def main(argv=None):
     n_items = len(items)
     n_gold_claims = len(all_axis1)
 
-    # Print report.
+    # Print seed report.
     print_report(
         axis1_metrics,
         axis1_confusion,
@@ -381,7 +670,42 @@ def main(argv=None):
         n_gold_claims,
     )
 
+    # ---------------------------------------------------------------------------
+    # Grader evaluation section
+    # ---------------------------------------------------------------------------
+
+    grader_items = load_grader_corpus(args.grader_corpus)
+
+    # Determine which graders to run.
+    graders_to_run = []  # list of (grader_instance, grader_label)
+
+    if args.grader in ("heuristic", "both"):
+        graders_to_run.append((HeuristicGrader(), "HeuristicGrader"))
+
+    if args.grader in ("llm", "both"):
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            graders_to_run.append((LLMGrader(), "LLMGrader(model=%s)" % _get_llm_model_label()))
+        else:
+            print("LLM grader unavailable: ANTHROPIC_API_KEY is not set; "
+                  "falling back to HeuristicGrader.")
+            if args.grader == "llm":
+                # For --grader llm with no key, run heuristic as fallback.
+                graders_to_run.append((HeuristicGrader(), "HeuristicGrader"))
+            # For --grader both, heuristic is already added above; no second block needed.
+
+    for grader_instance, grader_label in graders_to_run:
+        results = grade_grader_corpus(grader_items, grader_instance)
+        metrics = compute_grader_metrics(results)
+        print_grader_report(metrics, grader_label, len(grader_items))
+
     return 0
+
+
+def _get_llm_model_label() -> str:
+    """Return the model label used by LLMGrader for display purposes."""
+    # Mirror the default from provenance.grade without importing it at module level.
+    return os.environ.get("PROVENANCE_GRADER_MODEL", "claude-haiku-4-5-20251001")
 
 
 if __name__ == "__main__":
