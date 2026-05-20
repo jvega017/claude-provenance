@@ -225,24 +225,35 @@ For each run the harness reports:
 
 All values are computed at runtime from the corpus. No figures are hard-coded.
 
-### Structural finding: the heuristic cannot detect contradiction
+### Structural finding: contradiction-blindness is analytic, and its governance cost
 
-The offline `HeuristicGrader` operates by token overlap only. It checks
-whether salient tokens from the claim text appear in the source text. Token
-overlap has no model of negation and no mechanism for recognising that a
-source explicitly contradicts a claim by reversing its direction or replacing
-its figures. As a result, `HeuristicGrader` structurally cannot emit the
-`contradicted` verdict. The four verdicts it can produce are `verified`,
-`not_addressed`, `unverifiable`, and `skipped`.
+The offline `HeuristicGrader` operates by token overlap only. With a source
+present, its code path can return only `verified` or `not_addressed`: the
+verdict `contradicted` is not in its output alphabet. Its zero score on the
+`contradicted` block is therefore an analytic property of the algorithm, true
+by construction, not an empirical discovery. That token-overlap and lexical
+matching have no model of negation is established prior work in natural
+language inference (for example McCoy, Pavlick and Linzen 2019, the HANS
+diagnostic; He, Zha and Wang 2019 on negation-as-contradiction dataset cues).
+This harness does not claim to discover that.
 
-On the 16-item `contradicted` gold block (g015-g030), the heuristic is
-expected to mislabel items as `verified` (when the contradicting source
-contains most of the claim's tokens) or `not_addressed` (when token overlap is
-low). This is a measured structural property of the grader, not a defect
-introduced by the corpus design.
+The contribution this block supports is a governance one. On the 16-item
+`contradicted` gold block (g015-g030) the heuristic does not merely fail to
+flag contradiction: it returns a confident `verified` on the majority of
+items, because a contradicting source still contains nearly all of the
+claim's salient tokens (the polarity is carried by short verbs the tokeniser
+does not retain). A token-overlap citation verifier, deployed as a provenance
+control, therefore silently converts contradicted citations into supported
+ones. The reportable quantity is this false-certification count, not a
+precision or recall figure against a label the grader cannot emit.
 
-Only the optional `LLMGrader` can reason about whether a source opposes a
-claim and therefore produce a `contradicted` verdict.
+Scope, stated plainly. Sources here are synthetic and supplied inline with no
+fetch, so this measures reasoning over a given claim-source pair, a natural
+language inference setting, not end-to-end citation verification. Retrieval,
+source ambiguity and multi-document evidence are out of scope for this corpus
+and are named limitations, not results. Only a grader that can reason about
+opposition (the optional `LLMGrader`, or the evaluation-only `CodexGrader`)
+can emit `contradicted` at all.
 
 ### Honesty guardrails
 
@@ -258,15 +269,32 @@ interpreted and communicated. They are stated without softening.
    given a source, not end-to-end fetch reliability. Fetch reliability is a
    separate, unmeasured axis.
 
-3. The offline `HeuristicGrader` cannot emit `contradicted`: token overlap has
-   no model of negation. On the `contradicted` gold block the heuristic is
-   expected to mislabel items as `verified` or `not_addressed`. This is a
-   measured structural finding, not a defect introduced by the corpus.
+3. The offline `HeuristicGrader` cannot emit `contradicted`: with a source
+   present its code path returns only `verified` or `not_addressed`. Its zero
+   on the `contradicted` block is analytic, true by construction, not a
+   measured finding and not a defect introduced by the corpus. The polarity
+   word in those items is a short verb below the grader's salient-token length
+   cutoff, so the corpus and the tokeniser interact. Report this plainly: do
+   not present the zero as an experimental result.
 
-4. Any `LLMGrader` numbers depend on the model version in use and are not
-   reproducible bit-for-bit across runs or model updates. The associated paper,
-   *From Citation to Epistemic Governance*, is in preparation. Do not claim
-   stars, adoption, or benchmark status the project does not hold.
+4. Any `LLMGrader` or `CodexGrader` numbers depend on the model version in use
+   and are not reproducible bit-for-bit across runs or model updates. The
+   associated paper, *From Citation to Epistemic Governance*, is in
+   preparation. Do not claim stars, adoption, or benchmark status the project
+   does not hold.
+
+5. Prior art and claim scope. The blindness of lexical or token-overlap
+   matching to negation is established in the natural language inference
+   literature (McCoy, Pavlick and Linzen 2019; He, Zha and Wang 2019), and
+   automatic citation-verification benchmarks already exist (for example ALCE,
+   Gao et al. 2023; Liu, Zhang and Liang 2023). The contribution anchored to
+   this harness is the governance framing, that deployed token-overlap
+   provenance tooling false-certifies contradicted citations, not the
+   rediscovery of negation-blindness. A single cross-model run (one
+   alternative vendor) supports only the narrow claim that the recovery is not
+   idiosyncratic to one vendor. A claim that recovery is general across models
+   would require at least three version-pinned models spanning training
+   lineages, including one small or open model, and is not made here.
 
 ### How to extend the grader corpus
 
@@ -327,3 +355,11 @@ Honesty caveats (in addition to the four guardrails above).
    artefact exactly as published, and stays optional.
 4. `CodexGrader.grade()` never raises: any failure (binary missing, non-zero
    exit, timeout, schema or JSON failure) maps to verdict `error`.
+
+Reproducing the clean run. The default per-call timeout is 120 seconds.
+On slower machines a small number of source-bearing calls can exceed this
+and return verdict `error` (an infrastructure outcome, not a
+misclassification). Set `PROVENANCE_CODEX_TIMEOUT=300` to reproduce a run
+with no timeout-induced `error` items. The `error` count must always be
+reported explicitly with any result: a clean confusion matrix is only
+trustworthy if the `error` column is stated and zero.
