@@ -322,11 +322,245 @@ class LLMGrader:
 
 
 # ---------------------------------------------------------------------------
+# CodexGrader
+# ---------------------------------------------------------------------------
+
+_CODEX_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": sorted(_VALID_VERDICTS)},
+        "confidence": {"type": "number"},
+        "rationale": {"type": "string"},
+    },
+    "required": ["verdict", "confidence", "rationale"],
+    "additionalProperties": False,
+}
+
+
+class CodexGrader:
+    """Cross-model grader driven by the local Codex CLI (out of band).
+
+    This grader exists for evaluation only. It is never auto-selected by
+    get_grader() and is never reachable from the hook. It shells out to
+    `codex exec` as a separate, read-only, ephemeral subprocess and feeds it
+    exactly the same system prompt, claim, source and citation that
+    LLMGrader uses, so the two are a same-task, same-inputs, different-model
+    comparison.
+
+    It measures whether a different vendor's model recovers the contradiction
+    class that the token-overlap heuristic structurally cannot. Numbers are
+    model-dependent and not bit-reproducible. Requires the Codex CLI to be
+    installed and authenticated. Degrades to verdict "error" on ANY failure
+    (binary missing, non-zero exit, timeout, schema or JSON failure); never
+    raises.
+
+    Configuration (environment, all optional):
+        PROVENANCE_CODEX_BIN      codex binary name or path (default "codex")
+        PROVENANCE_CODEX_TIMEOUT  per-call timeout in seconds (default 120)
+        PROVENANCE_CODEX_MODEL    model passed to `codex exec -m` (default:
+                                  Codex config default; not overridden)
+
+    Stdlib only: subprocess, tempfile, json, os, re. Python 3.8 compatible.
+    """
+
+    grader_label = "codex-cli"
+
+    def _error(self, claim_text, citation, reason):
+        return Verdict(
+            claim_text=claim_text,
+            citation=citation,
+            verdict="error",
+            confidence=None,
+            rationale=str(reason)[:200],
+            grader=self.grader_label,
+        )
+
+    def grade(
+        self,
+        claim_text: str,
+        source_text: Optional[str],
+        citation: Optional[str],
+    ) -> Verdict:
+        """Grade a claim. Deterministic when there is no source text;
+        otherwise delegates the judgement to `codex exec`.
+        """
+        # No-source path is deterministic and matches HeuristicGrader, so the
+        # two graders are compared on identical ground for these items and no
+        # Codex call is spent.
+        if source_text is None:
+            if citation is not None:
+                return Verdict(
+                    claim_text=claim_text,
+                    citation=citation,
+                    verdict="unverifiable",
+                    confidence=None,
+                    rationale="Citation present but source text could not be retrieved.",
+                    grader=self.grader_label,
+                )
+            return Verdict(
+                claim_text=claim_text,
+                citation=citation,
+                verdict="skipped",
+                confidence=None,
+                rationale="No citation and no source text; nothing to check.",
+                grader=self.grader_label,
+            )
+
+        import subprocess
+        import tempfile
+
+        codex_bin = os.environ.get("PROVENANCE_CODEX_BIN") or self._resolve_codex_bin()
+        try:
+            timeout = int(os.environ.get("PROVENANCE_CODEX_TIMEOUT", "120"))
+        except (TypeError, ValueError):
+            timeout = 120
+        model = os.environ.get("PROVENANCE_CODEX_MODEL", "")
+
+        prompt = (
+            _SYSTEM_PROMPT
+            + "\n\n"
+            + _build_user_message(claim_text, source_text, citation)
+            + "\n\nDo not browse the filesystem or run commands. Answer only "
+            "with the JSON object described above."
+        )
+
+        schema_path = None
+        out_path = None
+        try:
+            sfd, schema_path = tempfile.mkstemp(suffix=".json", prefix="pv_codex_schema_")
+            with os.fdopen(sfd, "w", encoding="utf-8") as fh:
+                json.dump(_CODEX_SCHEMA, fh)
+            ofd, out_path = tempfile.mkstemp(suffix=".txt", prefix="pv_codex_out_")
+            os.close(ofd)
+
+            cmd = [
+                codex_bin, "exec",
+                "-s", "read-only",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--color", "never",
+                "--output-schema", schema_path,
+                "--output-last-message", out_path,
+            ]
+            if model:
+                cmd += ["-m", model]
+            cmd.append("-")  # read the prompt from stdin
+
+            with tempfile.TemporaryDirectory(prefix="pv_codex_cwd_") as workdir:
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=workdir,
+                    )
+                except FileNotFoundError:
+                    return self._error(claim_text, citation,
+                                       "Codex CLI not found: " + codex_bin)
+                except subprocess.TimeoutExpired:
+                    return self._error(claim_text, citation,
+                                       "Codex call timed out after %ds" % timeout)
+
+            try:
+                with open(out_path, "r", encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read().strip()
+            except OSError:
+                raw = ""
+
+            if not raw:
+                if proc.returncode != 0:
+                    return self._error(
+                        claim_text, citation,
+                        "Codex exited %d: %s" % (proc.returncode,
+                                                 (proc.stderr or "").strip()[:120]))
+                return self._error(claim_text, citation,
+                                   "Codex produced no final message.")
+
+            parsed = self._extract_json(raw)
+            if parsed is None:
+                return self._error(claim_text, citation,
+                                   "Could not parse JSON from Codex output.")
+
+            verdict_str = str(parsed.get("verdict", "error"))
+            if verdict_str not in _VALID_VERDICTS:
+                verdict_str = "error"
+
+            raw_conf = parsed.get("confidence")
+            try:
+                confidence = float(raw_conf) if raw_conf is not None else None
+                if confidence is not None:
+                    confidence = max(0.0, min(1.0, confidence))
+            except (TypeError, ValueError):
+                confidence = None
+
+            rationale = str(parsed.get("rationale", ""))[:200]
+
+            return Verdict(
+                claim_text=claim_text,
+                citation=citation,
+                verdict=verdict_str,
+                confidence=confidence,
+                rationale=rationale,
+                grader=self.grader_label,
+            )
+        except Exception as exc:  # never raise out of a grader
+            return self._error(claim_text, citation, "Codex grader failure: %s" % exc)
+        finally:
+            for p in (schema_path, out_path):
+                if p:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
+    @staticmethod
+    def _resolve_codex_bin():
+        """Resolve the codex executable robustly across platforms.
+
+        On Windows the npm-installed `codex` shim is an extensionless shell
+        script that CreateProcess cannot launch, so a bare "codex" fails
+        with FileNotFoundError and the grader degrades to verdict "error"
+        for every item. The `.cmd` shim runs correctly through subprocess.
+        Prefer an extension Windows can execute, then fall back to the bare
+        name so behaviour is unchanged on POSIX (where shutil.which for the
+        Windows-only names returns None and "codex" resolves normally).
+        """
+        import shutil
+        for name in ("codex.cmd", "codex.exe", "codex"):
+            found = shutil.which(name)
+            if found:
+                return found
+        return "codex"
+
+    @staticmethod
+    def _extract_json(raw: str):
+        """Parse a JSON object from Codex output, tolerating wrapping prose."""
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(raw[start:end + 1])
+            except Exception:
+                return None
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Factory function
 # ---------------------------------------------------------------------------
 
 def get_grader():
-    """Return an LLMGrader if ANTHROPIC_API_KEY is set, else HeuristicGrader."""
+    """Return an LLMGrader if ANTHROPIC_API_KEY is set, else HeuristicGrader.
+
+    CodexGrader is never auto-selected: it is an evaluation-only backend that
+    must be requested explicitly by the eval harness.
+    """
     if os.environ.get("ANTHROPIC_API_KEY"):
         return LLMGrader()
     return HeuristicGrader()
