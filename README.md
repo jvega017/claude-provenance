@@ -113,11 +113,19 @@ more or less sourced over time", and the ledger answers it.
 
 ## Evaluation
 
-`eval/run_eval.py` runs the detector against a small hand-labelled corpus and
-prints precision, recall, and F1 computed at run time. The numbers are
-corpus-dependent and are not a claim of general accuracy: see
-[`eval/README.md`](eval/README.md), which states the limits plainly. The
-corpus is a regression and illustration seed, not a validated benchmark.
+`eval/run_eval.py` runs the detector against the seed corpus and prints
+precision, recall and F1 at run time. From v0.3 the harness also runs a
+grader-precision-recall evaluation against a 60-item labelled corpus
+(`eval/corpus/grader.jsonl`) and reports per-class metrics, a five-by-six
+confusion matrix and a governance-framed caveat block. An evaluation-only
+cross-model backend (`python eval/run_eval.py --grader codex`) drives a
+local Codex CLI for a same-task different-model probe; it is never
+auto-selected and never run in CI. The numbers are corpus-dependent and
+not a claim of general accuracy: see [`eval/README.md`](eval/README.md),
+which states the limits, the analytic nature of the contradicted-class
+zero for the offline heuristic and the relevant prior art (McCoy, Pavlick
+and Linzen 2019; Gao et al. 2023) plainly. The corpora are regression and
+illustration seeds, not validated benchmarks.
 
 ## Tests
 
@@ -127,18 +135,25 @@ Stdlib only, no test dependencies. From the repo root:
 python -m unittest discover -s tests -v
 ```
 
-170 tests cover detection (every trigger, inline and adjacent sourcing, the
+247 tests cover detection (every trigger, inline and adjacent sourcing, the
 closed v0 false negative), the loop-safety guard, enforce-mode blocking, the
 verifier (mocked network, LLM-failure fallback, no-key path), the CLI, the
-ledger and salience scoring, and the rule that an internal error must never
-break the session.
+ledger and salience scoring, the grader-eval path (`sys.modules`-isolated
+under a unique spec name) and the Codex grader graceful-failure path. The
+rule that an internal error must never break the session is enforced
+throughout.
 
 ## Roadmap
 
 - v0: heuristic detector, ledger, report and enforce modes. Done.
-- v0.2 (this release): out-of-band verifier with fetch and graceful LLM
-  grading, two-axis model, standalone CLI and CI mode, epistemic-debt metric
-  and evidence-matrix export, salience weighting, evaluation harness.
+- v0.2: out-of-band verifier with fetch and graceful LLM grading, two-axis
+  model, standalone CLI and CI mode, epistemic-debt metric and
+  evidence-matrix export, salience weighting, evaluation harness.
+- v0.3 (this release): grader precision/recall evaluation with a labelled
+  60-item corpus and per-class P/R/F1; evaluation-only cross-model grader
+  backend (`--grader codex`) for same-task different-model comparison;
+  governance reframe of the eval documentation, positioning the contribution
+  against HANS and ALCE rather than as a rediscovery of negation-blindness.
 - v1: stronger claim extraction and source-match quality from the LLM grader.
 - v2: deeper entailment, including PDF and paywalled-source handling.
 - v3: one-command evidence-matrix export wired into a paper or brief workflow.
