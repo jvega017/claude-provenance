@@ -35,11 +35,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Redact local user paths (Windows, macOS, Linux, and MSYS forms) so no
+# artefact written by this harness can leak a username. Captured stderr
+# from the annotator CLI can contain absolute paths to local error logs;
+# the username segment is the only personal part and is replaced.
+_USER_PATH_RE = re.compile(r"(?i)([A-Za-z]:\\Users\\|/Users/|/home/|/c/Users/)[^\\/\s\"]+")
+
+
+def sanitise(text):
+    """Replace the username segment of any local path with <redacted>."""
+    if not text:
+        return text
+    return _USER_PATH_RE.sub(r"\1<redacted>", text)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_CORPUS = _REPO_ROOT / "eval" / "corpus" / "grader.jsonl"
@@ -127,41 +141,79 @@ def build_prompt(item: dict) -> str:
     )
 
 
-def call_gemini(prompt: str, gemini_bin: str, timeout: int) -> tuple:
+_TRANSIENT_MARKERS = ("503", "unavailable", "high demand", "rate", "overloaded")
+
+
+def _is_transient(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _TRANSIENT_MARKERS) and "terminalquotaerror" not in low
+
+
+def call_gemini(prompt: str, gemini_bin: str, timeout: int, model: str = "",
+                max_attempts: int = 3) -> tuple:
     """Return (predicted_class_or_None, raw_stdout, error_or_None).
 
+    The prompt is delivered on stdin, not via -p: the -p flag truncates a
+    multi-line prompt at the first newline when the CLI is launched through
+    a Windows .cmd shim, which silently strips the rubric and the item.
+    Stdin delivery passes the full prompt intact on every platform.
+
     Never raises. Maps every failure to (None, raw, error_message) so the
-    caller can record an 'error' verdict and continue.
+    caller can record an 'error' verdict and continue. Retries up to
+    max_attempts on transient errors (503, high demand) but never on a
+    terminal quota error. All returned strings are sanitised so no local
+    username or path is recorded in the artefact.
     """
-    try:
-        result = subprocess.run(
-            [gemini_bin, "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except FileNotFoundError:
-        return None, "", "binary-not-found: {}".format(gemini_bin)
-    except subprocess.TimeoutExpired:
-        return None, "", "timeout after {}s".format(timeout)
-    except Exception as exc:  # broad: this is best-effort harness, not core
-        return None, "", "subprocess-error: {}".format(exc)
+    cmd = [gemini_bin]
+    if model:
+        cmd += ["-m", model]
 
-    if result.returncode != 0:
-        return None, result.stdout or "", "non-zero exit {}: stderr={}".format(
-            result.returncode, (result.stderr or "").strip()[:200]
-        )
+    last_err = "unknown"
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except FileNotFoundError:
+            return None, "", "binary-not-found"
+        except subprocess.TimeoutExpired:
+            last_err = "timeout after {}s".format(timeout)
+            continue
+        except Exception as exc:  # broad: this is best-effort harness, not core
+            return None, "", sanitise("subprocess-error: {}".format(exc))
 
-    out = (result.stdout or "").strip()
-    if not out:
-        return None, "", "empty stdout"
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            last_err = sanitise(
+                "non-zero exit {}: stderr={}".format(result.returncode, stderr[:200])
+            )
+            if _is_transient(stderr) and attempt < max_attempts:
+                time.sleep(5 * attempt)
+                continue
+            return None, sanitise(result.stdout or ""), last_err
 
-    pred = _parse_class(out)
-    if pred is None:
-        return None, out, "no class found in output (head: {!r})".format(out[:200])
-    return pred, out, None
+        out = (result.stdout or "").strip()
+        if not out:
+            last_err = "empty stdout"
+            if attempt < max_attempts:
+                time.sleep(3)
+                continue
+            return None, "", last_err
+
+        pred = _parse_class(out)
+        if pred is None:
+            return None, out, sanitise(
+                "no class found in output (head: {!r})".format(out[:200])
+            )
+        return pred, out, None
+
+    return None, "", last_err
 
 
 def _parse_class(raw: str) -> str:
@@ -240,9 +292,52 @@ def compute_metrics(results: list) -> dict:
 
 
 def write_report(metrics: dict, meta: dict, out_path: Path) -> None:
-    lines = [
-        "# Probe A: label-reproducibility report",
-        "",
+    n = metrics.get("n", 0)
+    err = metrics.get("error_count", 0)
+    classes_with_no_returns = [
+        c for c in GOLD_CLASSES
+        if metrics.get("per_class", {}).get(c, {}).get("support", 0) > 0
+        and metrics.get("per_class", {}).get(c, {}).get("correct", 0) == 0
+        and all(
+            metrics.get("confusion", {}).get("{}__{}".format(c, p), 0) == 0
+            for p in GOLD_CLASSES if p != c
+        )
+    ]
+    # A class is "unreached" if every confusion cell except its error column
+    # is zero. Compute that strictly.
+    unreached = []
+    for c in GOLD_CLASSES:
+        non_error = sum(
+            metrics.get("confusion", {}).get("{}__{}".format(c, p), 0)
+            for p in GOLD_CLASSES
+        )
+        if non_error == 0 and metrics.get("per_class", {}).get(c, {}).get("support", 0) > 0:
+            unreached.append(c)
+
+    lines = ["# Probe A: label-reproducibility report", ""]
+
+    if err > 0:
+        lines += [
+            "## STATUS: partial run, infrastructure errors present",
+            "",
+            "{} of {} items returned an `error` predicted label (annotator".format(err, n),
+            "infrastructure failure, not a classification result). The headline",
+            "agreement and kappa below count errors in the totals so they reduce",
+            "the numbers honestly. Read the per-class block: a class with zero",
+            "returns reflects a quota or transport cut-off on that segment of",
+            "the corpus, not a finding about reproducibility for that class.",
+            "",
+        ]
+        if unreached:
+            lines += [
+                "**Classes not reached by the annotator on this run:** "
+                + ", ".join(sorted(unreached)) + ".",
+                "A follow-up run targeting only the unreached items would close",
+                "the gap with a fraction of the original quota cost.",
+                "",
+            ]
+
+    lines += [
         "**This is a machine reproducibility signal. It is NOT human inter-rater",
         "reliability.** A different-family model (Gemini) was given the same",
         "visible labelling fields (claim, citation, source) as a human annotator,",
@@ -254,7 +349,8 @@ def write_report(metrics: dict, meta: dict, out_path: Path) -> None:
         "",
         "- date: {}".format(meta.get("date", "")),
         "- corpus: {} ({} items)".format(meta.get("corpus", ""), metrics.get("n", 0)),
-        "- annotator model (Probe A): {}".format(meta.get("annotator", "")),
+        "- annotator (Probe A): {}".format(meta.get("annotator", "")),
+        "- annotator model: {}".format(meta.get("model", "")),
         "- grader model being de-conflated from labels: Codex (GPT-5.x family) — different family from annotator (different-family agreement is informative; same-family is not).",
         "- per-call timeout: {}s".format(meta.get("timeout", "")),
         "",
@@ -327,6 +423,7 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("PROBE_A_TIMEOUT", "120")))
     parser.add_argument("--annotator", default="gemini-cli", help="label for the report")
     parser.add_argument("--bin", default=os.environ.get("PROBE_A_BIN", "gemini"))
+    parser.add_argument("--model", default=os.environ.get("PROBE_A_MODEL", ""), help="model passed to the CLI via -m (e.g. gemini-2.5-flash)")
     args = parser.parse_args(argv)
 
     items = load_corpus(args.corpus)
@@ -334,15 +431,15 @@ def main(argv=None) -> int:
         items = items[: args.limit]
 
     gemini_bin = _resolve_bin(args.bin)
-    print("probe-a: corpus={} items={} annotator={} bin={}".format(
-        args.corpus, len(items), args.annotator, gemini_bin
+    print("probe-a: corpus={} items={} annotator={} model={} bin=<resolved>".format(
+        args.corpus, len(items), args.annotator, args.model or "<cli-default>"
     ), flush=True)
 
     results = []
     started = time.time()
     for idx, item in enumerate(items, 1):
         prompt = build_prompt(item)
-        pred, raw, err = call_gemini(prompt, gemini_bin, args.timeout)
+        pred, raw, err = call_gemini(prompt, gemini_bin, args.timeout, args.model)
         pred_label = pred if pred is not None else "error"
         results.append({
             "id": item["id"],
@@ -361,10 +458,15 @@ def main(argv=None) -> int:
     elapsed = time.time() - started
     metrics = compute_metrics(results)
 
+    try:
+        corpus_label = str(args.corpus.relative_to(_REPO_ROOT))
+    except ValueError:
+        corpus_label = args.corpus.name  # never record an absolute path
     meta = {
         "date": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
-        "corpus": str(args.corpus.relative_to(_REPO_ROOT) if _REPO_ROOT in args.corpus.parents else args.corpus),
+        "corpus": corpus_label,
         "annotator": args.annotator,
+        "model": args.model or "<cli-default>",
         "timeout": args.timeout,
         "elapsed_seconds": round(elapsed, 1),
     }
