@@ -14,6 +14,28 @@ model before the turn can end.
 
 It is a small idea, applied strictly. That is the whole point.
 
+## WarrantOS framing
+
+`claude-provenance` is now framed as an early WarrantOS implementation: a
+warrant layer for AI-assisted work that makes claims, sources, context use and
+release gates inspectable. The current repo does not implement a complete
+compliance platform. It implements useful pieces of the stack:
+
+- the Provenance Ledger for claim detection, verification outcomes and
+  epistemic-debt tracking;
+- Context Admissibility for deciding which process context may influence final
+  prose;
+- CBOM export for a compact Context Bill of Materials;
+- a Prose Boundary Gate for blocking process narration in reader-facing text;
+- BriefLock and Multi-Agent Review as product and workflow frames over the
+  existing hook, CLI, ledger and review surfaces.
+
+Start with [`docs/STACK.md`](docs/STACK.md) for the product map,
+[`docs/CONTEXT-ADMISSIBILITY.md`](docs/CONTEXT-ADMISSIBILITY.md) for CBOM and
+prose-boundary rules, and
+[`docs/MULTI-AGENT-REVIEW.md`](docs/MULTI-AGENT-REVIEW.md) for the review
+workflow.
+
 ## Why this exists
 
 This plugin is the operational form of a working paper, *From Citation to
@@ -100,6 +122,23 @@ into a CI pipeline or pre-commit hook. `--json` emits machine-readable output.
 
 In a session, `/provenance-report` summarises the ledger and
 `/provenance-verify` runs the verification stage and returns recommendations.
+
+## Build a Context Bill of Materials
+
+CBOM mode checks a different boundary from claim provenance. It classifies
+context material, records allowed transformations, and scans final prose for
+process leakage.
+
+```
+python cli/provenance_cli.py --cbom --context context.json final.md
+python cli/provenance_cli.py --cbom --context context.json --json final.md
+python cli/provenance_cli.py --cbom --context context.txt --ci final.md
+```
+
+`--context` accepts JSON items such as
+`{"id": "feedback_017", "text": "This is not commercial enough."}` or plain
+text with one context item per non-empty line. In `--ci` mode, process leakage
+such as "based on your feedback" causes a failing exit code.
 
 ## Governance: epistemic debt
 

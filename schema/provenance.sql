@@ -47,3 +47,67 @@ CREATE TABLE IF NOT EXISTS provenance_verification (
 
 CREATE INDEX IF NOT EXISTS idx_verif_claim   ON provenance_verification(claim_id);
 CREATE INDEX IF NOT EXISTS idx_verif_verdict ON provenance_verification(verdict);
+
+-- v2: Context Integrity Layer
+-- Tracks fuzzy/process context separately from final prose. This is the
+-- BriefLock use case: context may influence output, appear only in audit
+-- metadata, or be excluded entirely.
+
+CREATE TABLE IF NOT EXISTS context_item (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                         TEXT    NOT NULL,      -- ISO-8601 UTC
+    context_id                 TEXT    NOT NULL,
+    context_type               TEXT    NOT NULL,      -- user_feedback | empirical_evidence | style_signal | ...
+    ledger_bucket              TEXT    NOT NULL,      -- empirical | synthesised | process | excluded
+    can_influence_output       INTEGER NOT NULL,      -- 0 | 1
+    can_appear_in_final_prose  INTEGER NOT NULL,      -- 0 | 1
+    allowed_transformation     TEXT    NOT NULL,      -- derived_requirement | claim_or_citation | ...
+    audit_status               TEXT    NOT NULL,      -- recorded | audit_only | excluded
+    raw_text                   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cbom_run (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             TEXT    NOT NULL,
+    cbom_id        TEXT    NOT NULL,
+    artefact       TEXT,
+    artefact_role  TEXT    NOT NULL,
+    summary_json   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS review_finding (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                  TEXT    NOT NULL,
+    review_pack_id      TEXT    NOT NULL,
+    reviewer            TEXT    NOT NULL,
+    angle               TEXT,
+    finding_id          TEXT    NOT NULL,
+    severity            TEXT    NOT NULL,
+    confidence          TEXT,
+    evidence            TEXT,
+    recommended_action  TEXT,
+    status              TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS context_transform (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    context_row_id INTEGER NOT NULL REFERENCES context_item(id),
+    ts             TEXT    NOT NULL,
+    kind           TEXT    NOT NULL,
+    transform_text TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prose_boundary_violation (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT    NOT NULL,
+    artefact     TEXT,
+    rule_id      TEXT    NOT NULL,
+    severity     TEXT    NOT NULL,
+    matched_text TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_id       ON context_item(context_id);
+CREATE INDEX IF NOT EXISTS idx_context_type     ON context_item(context_type);
+CREATE INDEX IF NOT EXISTS idx_boundary_rule    ON prose_boundary_violation(rule_id);
+CREATE INDEX IF NOT EXISTS idx_cbom_id          ON cbom_run(cbom_id);
+CREATE INDEX IF NOT EXISTS idx_review_pack      ON review_finding(review_pack_id);

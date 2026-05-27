@@ -10,6 +10,8 @@ Public API:
     from provenance.grade import Verdict, HeuristicGrader, LLMGrader, get_grader
     from provenance.verify import fetch_text, extract_citation, verify_claim, verify_text
     from provenance.extract import CLAIM_TRIGGERS, CITATION_MARKERS, CITE_NEEDED, sentences
+    from provenance.context_admissibility import classify_context, scan_prose_boundary, compile_cbom
+    from provenance.boundary import check_boundary
 """
 
 from provenance.grade import (
@@ -24,6 +26,17 @@ from provenance.verify import (
     verify_claim,
     verify_text,
 )
+from provenance.context_admissibility import (
+    BoundaryResult,
+    BoundaryViolation,
+    ContextItem,
+    DerivedRequirement,
+    classify_context,
+    compile_cbom,
+    derive_requirement,
+    scan_prose_boundary,
+)
+from provenance.boundary import check_boundary
 
 __all__ = [
     "Verdict",
@@ -34,4 +47,13 @@ __all__ = [
     "extract_citation",
     "verify_claim",
     "verify_text",
+    "ContextItem",
+    "DerivedRequirement",
+    "BoundaryViolation",
+    "BoundaryResult",
+    "classify_context",
+    "derive_requirement",
+    "scan_prose_boundary",
+    "check_boundary",
+    "compile_cbom",
 ]
