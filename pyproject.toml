@@ -68,6 +68,7 @@ Documentation = "https://github.com/jvega017/claude-provenance/blob/main/docs/OV
 warrantos = "cli.warrantos_cli:main"
 provenance = "cli.provenance_cli:main"
 warrantos-mcp = "provenance.mcp_server:run_stdio_server"
+warrantos-verify-hook = "hooks.claude_code_verify_hook:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
