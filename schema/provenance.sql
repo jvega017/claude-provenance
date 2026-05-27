@@ -47,3 +47,92 @@ CREATE TABLE IF NOT EXISTS provenance_verification (
 
 CREATE INDEX IF NOT EXISTS idx_verif_claim   ON provenance_verification(claim_id);
 CREATE INDEX IF NOT EXISTS idx_verif_verdict ON provenance_verification(verdict);
+
+-- v2: Context Integrity Layer
+-- Tracks fuzzy/process context separately from final prose. This is the
+-- BriefLock use case: context may influence output, appear only in audit
+-- metadata, or be excluded entirely.
+
+CREATE TABLE IF NOT EXISTS context_item (
+    id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                         TEXT    NOT NULL,      -- ISO-8601 UTC
+    context_id                 TEXT    NOT NULL,
+    context_type               TEXT    NOT NULL,      -- user_feedback | empirical_evidence | style_signal | ...
+    ledger_bucket              TEXT    NOT NULL,      -- empirical | synthesised | process | excluded
+    can_influence_output       INTEGER NOT NULL,      -- 0 | 1
+    can_appear_in_final_prose  INTEGER NOT NULL,      -- 0 | 1
+    allowed_transformation     TEXT    NOT NULL,      -- derived_requirement | claim_or_citation | ...
+    audit_status               TEXT    NOT NULL,      -- recorded | audit_only | excluded
+    raw_text                   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cbom_run (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             TEXT    NOT NULL,
+    cbom_id        TEXT    NOT NULL,
+    artefact       TEXT,
+    artefact_role  TEXT    NOT NULL,
+    summary_json   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS review_finding (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                  TEXT    NOT NULL,
+    review_pack_id      TEXT    NOT NULL,
+    reviewer            TEXT    NOT NULL,
+    angle               TEXT,
+    finding_id          TEXT    NOT NULL,
+    severity            TEXT    NOT NULL,
+    confidence          TEXT,
+    evidence            TEXT,
+    recommended_action  TEXT,
+    status              TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS context_transform (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    context_row_id INTEGER NOT NULL REFERENCES context_item(id),
+    ts             TEXT    NOT NULL,
+    kind           TEXT    NOT NULL,
+    transform_text TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prose_boundary_violation (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT    NOT NULL,
+    artefact     TEXT,
+    rule_id      TEXT    NOT NULL,
+    severity     TEXT    NOT NULL,
+    matched_text TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_id       ON context_item(context_id);
+CREATE INDEX IF NOT EXISTS idx_context_type     ON context_item(context_type);
+CREATE INDEX IF NOT EXISTS idx_boundary_rule    ON prose_boundary_violation(rule_id);
+CREATE INDEX IF NOT EXISTS idx_cbom_id          ON cbom_run(cbom_id);
+CREATE INDEX IF NOT EXISTS idx_review_pack      ON review_finding(review_pack_id);
+
+-- SPEC-v0.2 Layer 8: structured human override ledger
+-- A row in human_override records every human-recorded override of a
+-- Layer 7 gate verdict. SPEC-L8-S002 requires that overrides are
+-- recorded as ledger rows; SPEC-L8-S004 requires that the rationale
+-- conforms to this structured schema with non-empty risk_accepted and
+-- non-empty compensating_control fields (empty values SHALL block the
+-- override at the write path). SPEC-L8-S003 requires that
+-- single_actor=1 implies the artefact is downgraded out of final-prose.
+
+CREATE TABLE IF NOT EXISTS human_override (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                      TEXT    NOT NULL,    -- ISO-8601 UTC
+    run_id                  TEXT    NOT NULL,    -- WarrantOS run identifier
+    reviewer                TEXT    NOT NULL,    -- identity that approved the override
+    gate_id                 TEXT    NOT NULL,    -- which Layer 7 gate failed (G1/G2/G3/G4/G5)
+    failure_class           TEXT    NOT NULL,    -- the verdict that fired (boundary | unsupported | contradicted | ...)
+    risk_accepted           TEXT    NOT NULL,    -- SPEC-L8-S004: SHALL be non-empty
+    compensating_control    TEXT    NOT NULL,    -- SPEC-L8-S004: SHALL be non-empty
+    escalation_path_taken   TEXT    NOT NULL,    -- MAY be "none recorded" but column is non-null
+    single_actor            INTEGER NOT NULL     -- 0 | 1 per SPEC-L8-S003
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_override_run_id  ON human_override(run_id);
+CREATE INDEX IF NOT EXISTS idx_human_override_gate_id ON human_override(gate_id);

@@ -14,6 +14,65 @@ model before the turn can end.
 
 It is a small idea, applied strictly. That is the whole point.
 
+## WarrantOS framing
+
+`claude-provenance` is now framed as an early WarrantOS implementation: a
+warrant layer for AI-assisted work that makes claims, sources, context use and
+release gates inspectable. The current repo does not implement a complete
+compliance platform. It implements useful pieces of the stack:
+
+- the Provenance Ledger for claim detection, verification outcomes and
+  epistemic-debt tracking;
+- Context Admissibility for deciding which process context may influence final
+  prose;
+- CBOM export for a compact Context Bill of Materials;
+- a Prose Boundary Gate for blocking process narration in reader-facing text;
+- BriefLock and Multi-Agent Review as product and workflow frames over the
+  existing hook, CLI, ledger and review surfaces.
+
+Start with [`docs/STACK.md`](docs/STACK.md) for the product map,
+[`docs/CONTEXT-ADMISSIBILITY.md`](docs/CONTEXT-ADMISSIBILITY.md) for CBOM and
+prose-boundary rules, and
+[`docs/MULTI-AGENT-REVIEW.md`](docs/MULTI-AGENT-REVIEW.md) for the review
+workflow.
+
+## What is new (Path X3 + X4)
+
+The integration CLI `cli/warrantos_cli.py` now wires the WarrantOS upstream
+leg end-to-end: Layer 1 classification with SPEC-L1-S005 review-role gating,
+Layer 7 G1 prose-boundary scan, Layer 7 G2 claim detection, CBOM v0.2
+assembly with `actor_identity` and override-ledger references, and a
+four-state consolidated verdict (PASS, HOLD, BLOCK, NOT_ASSESSABLE):
+
+```
+python cli/warrantos_cli.py check draft.md \
+  --context context.json \
+  --actor-identity actor.json \
+  --profile final-prose \
+  --ci --json
+```
+
+The structured human-override ledger (`provenance.overrides`) enforces
+SPEC-L8-S004 at the write path: empty `risk_accepted` or
+`compensating_control` SHALL block the override, so the row does not
+exist if it cannot be recorded. SPEC-L8-S003 separation-of-duties:
+when the reviewer identity matches the writer-pack actor identity for a
+final-prose artefact, the role is downgraded to `draft`.
+
+The MCP server (`provenance/mcp_server.py`) wraps the pipeline as four
+tools (`warrant_check`, `warrant_classify`, `warrant_record_override`,
+`warrant_get_run`) callable from Claude Code or Claude Desktop. The
+`mcp` SDK is an optional dependency; `call_tool_in_process()` works
+without it as a plain Python API.
+
+The shadow observer (`tools/warrantos-shadow-observe.py`) runs the
+pipeline over an already-published artefact in observation mode only.
+Never blocks. Never modifies production scripts. Appends a single
+JSON-line summary per run to a shadow log with a "NOT enforced" marker
+on every row.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full Path X3 + X4 entry.
+
 ## Why this exists
 
 This plugin is the operational form of a working paper, *From Citation to
@@ -100,6 +159,23 @@ into a CI pipeline or pre-commit hook. `--json` emits machine-readable output.
 
 In a session, `/provenance-report` summarises the ledger and
 `/provenance-verify` runs the verification stage and returns recommendations.
+
+## Build a Context Bill of Materials
+
+CBOM mode checks a different boundary from claim provenance. It classifies
+context material, records allowed transformations, and scans final prose for
+process leakage.
+
+```
+python cli/provenance_cli.py --cbom --context context.json final.md
+python cli/provenance_cli.py --cbom --context context.json --json final.md
+python cli/provenance_cli.py --cbom --context context.txt --ci final.md
+```
+
+`--context` accepts JSON items such as
+`{"id": "feedback_017", "text": "This is not commercial enough."}` or plain
+text with one context item per non-empty line. In `--ci` mode, process leakage
+such as "based on your feedback" causes a failing exit code.
 
 ## Governance: epistemic debt
 

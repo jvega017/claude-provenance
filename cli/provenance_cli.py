@@ -23,6 +23,12 @@ Options:
     --json     Emit machine-readable JSON to stdout instead of a text report.
     --grader   Optional grader string passed through to verify_text.
                Default: None (the package chooses the grader).
+    --cbom     Build a Context Bill of Materials and run the prose boundary
+               gate instead of the factual-claim provenance check.
+    --context  Path to a JSON or text file containing source context for
+               --cbom mode.
+    --profile  Output profile for --cbom boundary checks:
+               final-prose | brief-light | paper-full | audit.
 
 Design rules:
     - stdlib only; zero third-party dependencies
@@ -40,6 +46,18 @@ import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+# When invoked as `python cli/provenance_cli.py`, sys.path[0] is the cli/
+# directory rather than the repo root, so `import provenance.X` fails with
+# ModuleNotFoundError. The two test_context_cli.py failures in the
+# 2026-05-27 baseline traced to this: --cbom mode hit
+# _import_context_admissibility(), the lazy import returned None, and the
+# CLI emitted "context admissibility module is not available." with no
+# JSON or text output. The four lines below make the repository root
+# importable so the lazy imports actually find the package.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +107,86 @@ def _import_extract():
         return pe
     except ImportError:
         return None
+
+
+def _import_context_admissibility():
+    """Lazily import the context admissibility module."""
+    try:
+        import provenance.context_admissibility as ca  # type: ignore
+        return ca
+    except ImportError:
+        return None
+
+
+def _load_context_items(context_path: str):
+    """Load context items from JSON or plain text.
+
+    JSON input accepts either:
+      [{"id": "feedback_1", "text": "..."}]
+      {"items": [{"id": "feedback_1", "text": "..."}]}
+
+    Plain text input creates one item per non-empty line. This keeps the CLI
+    useful for simple GitHub Actions and local shell workflows.
+    """
+    ca = _import_context_admissibility()
+    if ca is None:
+        raise RuntimeError("provenance.context_admissibility is not available")
+
+    text = _read_path(Path(context_path))
+    stripped = text.strip()
+    raw_items = []
+    if stripped.startswith("{") or stripped.startswith("["):
+        data = json.loads(stripped)
+        if isinstance(data, dict):
+            data = data.get("items", [])
+        if not isinstance(data, list):
+            raise ValueError("context JSON must be a list or an object with an items list")
+        for i, entry in enumerate(data, 1):
+            if isinstance(entry, dict):
+                cid = entry.get("id") or entry.get("context_id") or "context_%03d" % i
+                raw = entry.get("text") or entry.get("raw_text") or ""
+            else:
+                cid = "context_%03d" % i
+                raw = str(entry)
+            raw_items.append((str(cid), raw))
+    else:
+        for i, line in enumerate([ln.strip() for ln in text.splitlines() if ln.strip()], 1):
+            raw_items.append(("context_%03d" % i, line))
+
+    return [ca.classify_context(cid, raw) for cid, raw in raw_items]
+
+
+def _build_cbom_text_report(source_label: str, cbom: dict) -> str:
+    """Build a human-readable CBOM report."""
+    lines = ["claude-provenance: context integrity check", "=" * 48]
+    lines.append("Source: %s" % source_label)
+    lines.append("")
+    summary = cbom.get("summary", {})
+    lines.append(
+        "Context items: %(total_context_items)s   influence: %(can_influence_output)s   "
+        "final-prose-admissible: %(can_appear_in_final_prose)s   audit-only: %(audit_only)s   "
+        "excluded: %(excluded)s" % summary
+    )
+    boundary = cbom.get("prose_boundary", {})
+    lines.append("Prose boundary: %s" % boundary.get("verdict", "unknown"))
+    violations = boundary.get("violations", [])
+    if violations:
+        lines.append("")
+        lines.append("Process-to-prose leakage:")
+        for item in violations:
+            lines.append(
+                "  [%s/%s] %s"
+                % (item.get("severity", ""), item.get("rule_id", ""), item.get("matched_text", ""))
+            )
+    transforms = cbom.get("transforms", [])
+    if transforms:
+        lines.append("")
+        lines.append("Admissible transforms:")
+        for item in transforms[:10]:
+            lines.append("  [%s] %s" % (item.get("kind", ""), item.get("text", "")))
+        if len(transforms) > 10:
+            lines.append("  ... and %d more." % (len(transforms) - 10))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +453,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         metavar="GRADER",
         help="Optional grader identifier passed through to verify_text.",
     )
+    parser.add_argument(
+        "--cbom",
+        action="store_true",
+        default=False,
+        help="Build a Context Bill of Materials and run the prose boundary gate.",
+    )
+    parser.add_argument(
+        "--context",
+        default=None,
+        metavar="PATH",
+        help="Context JSON/text file for --cbom mode.",
+    )
+    parser.add_argument(
+        "--profile",
+        default="final-prose",
+        metavar="PROFILE",
+        help="Boundary profile for --cbom mode: final-prose, brief-light, paper-full, audit.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -391,6 +507,54 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not sources:
         sys.stderr.write("provenance: no content to analyse.\n")
         return 1 if args.ci else 0
+
+    # ------------------------------------------------------------------
+    # Context Integrity / CBOM mode
+    # ------------------------------------------------------------------
+    if args.cbom:
+        ca = _import_context_admissibility()
+        if ca is None:
+            sys.stderr.write(
+                "provenance: context admissibility module is not available.\n"
+            )
+            return 1 if args.ci else 0
+        if not args.context:
+            sys.stderr.write("provenance: --cbom requires --context PATH.\n")
+            return 1 if args.ci else 0
+
+        all_reports = []
+        any_ci_failure = False
+        try:
+            context_items = _load_context_items(args.context)
+        except Exception as exc:
+            sys.stderr.write("provenance: cannot read context: %s\n" % exc)
+            return 1 if args.ci else 0
+
+        for label, text in sources:
+            cbom = ca.compile_cbom(context_items, text, artefact_role=args.profile)
+            blocked = cbom.get("prose_boundary", {}).get("verdict") == "blocked"
+            if blocked:
+                any_ci_failure = True
+            if args.json_out:
+                report = cbom
+            else:
+                report = _build_cbom_text_report(label, cbom)
+            all_reports.append((label, report))
+
+        if args.json_out:
+            print(json.dumps({
+                "results": [
+                    {"source": label, "report": report}
+                    for label, report in all_reports
+                ],
+                "ci_failure": any_ci_failure,
+            }, indent=2))
+        else:
+            for i, (label, report) in enumerate(all_reports):
+                if i > 0:
+                    print()
+                print(report)
+        return 1 if (args.ci and any_ci_failure) else 0
 
     # ------------------------------------------------------------------
     # Check whether the provenance package is available
