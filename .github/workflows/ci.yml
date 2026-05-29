@@ -24,3 +24,5 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Smoke-test the evaluation harness (offline, must exit 0)
         run: python eval/run_eval.py
+      - name: Smoke-test the four-verdict gallery (thesis demo, must exit 0)
+        run: python tools/run_gallery.py

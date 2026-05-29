@@ -2,8 +2,95 @@
 
 WarrantOS is the product frame for a set of controls that make AI-assisted
 work auditable before it becomes reader-facing output. The current
-`claude-provenance` repository is not the full operating system. It is a
-working, stdlib-first implementation of several warrant gates:
+`claude-provenance` repository is the stdlib-first reference implementation
+of the WarrantOS architecture; it is a working subset of the full
+specification, not the full operating system.
+
+## Architecture diagram
+
+```mermaid
+flowchart LR
+    subgraph IN[Input]
+        D[Draft markdown]
+        C[Context items JSON]
+        A[Actor identity JSON]
+    end
+
+    subgraph L1[Layer 1: Context classification]
+        CL[classify_context]
+    end
+
+    subgraph L2[Layer 2: Provenance ledger]
+        LP[SQLite ledger + INV-004 append-only triggers]
+    end
+
+    subgraph L3L4[Layers 3 & 4: Applied insight + admissibility]
+        DI[derive_requirement]
+        AD[per-actor admissibility]
+    end
+
+    subgraph L5L6[Layers 5 & 6: Clean-room writer]
+        WP[Writer pack: Clean Brief + Approved Sources + Rules]
+        CR[Clean-room generation]
+    end
+
+    subgraph L7[Layer 7: Output integrity gates]
+        G1[G1 prose boundary]
+        G2[G2 claim provenance]
+        G3[G3 self-grounding]
+        G4[G4 contamination - STARTER]
+        G5[G5 calibration - STARTER]
+    end
+
+    subgraph L8[Layer 8: Human review & override]
+        OV[Override ledger + separation-of-duties downgrade]
+        FT[Reader-facing override footer]
+    end
+
+    subgraph OUT[Four-state verdict]
+        V{Consolidate}
+        VP[PASS - ship]
+        VH[HOLD - cite or downgrade]
+        VB[BLOCK - rewrite]
+        VN[NOT_ASSESSABLE - supply identity]
+    end
+
+    D --> G1
+    D --> G2
+    C --> CL --> LP --> DI --> AD --> WP --> CR
+    AD --> G1
+    A --> V
+    G1 --> V
+    G2 --> V
+    G3 --> V
+    G4 --> V
+    G5 --> V
+    OV --> V
+    V --> VP
+    V --> VH
+    V --> VB
+    V --> VN
+    VP --> FT
+    VH --> FT
+    VB --> FT
+```
+
+Reading the diagram: context flows top-to-bottom through classification,
+admissibility, and the writer pack; the draft and the writer's output flow
+through the five output integrity gates; the eight verdict signals consolidate
+into one of four states; the override ledger sits beside the verdict layer so
+human authority is recorded as structured evidence, not free text. `NOT_BUILT`
+foundation rows (Data Classification, Retention/Tombstones) wrap the whole
+stack and are documented as adopter-supplied; they do not appear in the
+runtime path.
+
+For the per-layer build state at the current version, see
+[`STATUS.md`](STATUS.md). For the layer-to-module mapping table, see
+[`OVERVIEW.md`](OVERVIEW.md).
+
+## Working subset shipped today
+
+The repository implements the warrant gates whose mechanics are stable:
 
 - Provenance Ledger: record claim checks, outcomes, and epistemic debt.
 - Context Admissibility: decide which pieces of process context may influence

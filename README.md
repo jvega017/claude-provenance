@@ -60,6 +60,20 @@ Expected verdict: `HOLD` with one unsupported load-bearing claim. The demo is wi
 
 `NOT_ASSESSABLE` is deliberate. Most tools binary-ise into pass/fail. The fourth state names the case where the artefact is missing the metadata required to certify, instead of certifying on incomplete information.
 
+The four verdicts are exercised end-to-end in the [`examples/`](examples/) gallery: one runnable case per verdict, plus a `tools/run_gallery.py` thesis demo that runs all four and asserts each example produces its documented verdict. CI runs the same demo on every push.
+
+## The honest pitch
+
+`claude-provenance` does not guarantee that AI-assisted writing is correct. No tool can. It guarantees five operational properties instead:
+
+1. **Unsourced claims are expensive, not invisible.** The detector logs every unsupported factual sentence; the ledger keeps the count over time.
+2. **Process material cannot leak into final prose silently.** The Layer 7 G1 boundary gate blocks "based on your feedback" and the rest of the lexical-residue pattern set under the `final-prose` profile.
+3. **Overrides cannot reach the public artefact without a structured rationale.** Empty `risk_accepted` or `compensating_control` blocks the write; SQLite `BEFORE UPDATE` triggers (INV-004) prevent silent post-hoc edits.
+4. **Separation of duties is a verdict-layer property, not a policy.** When the reviewer identity matches the writer identity, a final-prose artefact downgrades to draft automatically.
+5. **The four-state verdict refuses to certify on incomplete information.** `NOT_ASSESSABLE` fires when the metadata required to certify is missing, instead of `PASS` masking the gap.
+
+What this does **not** guarantee: that the underlying model produced correct text, that a cited source is the strongest available source, or that adopters' domain-specific Data Classification and Retention/Tombstones rows (both `NOT_BUILT` at v0.9.0b1) are sound. Those remain adopter-supplied.
+
 ## What landed in v0.9.0b1
 
 User-outcome language; SPEC IDs in [`CHANGELOG.md`](CHANGELOG.md).
