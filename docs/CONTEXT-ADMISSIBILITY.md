@@ -29,18 +29,28 @@ make decisions inspectable, not to infer every nuance.
 
 ## Current Context Types
 
+The eleven canonical SPEC §2.2 context classes implemented in
+`provenance/context_admissibility.py`:
+
 | Context type | Ledger bucket | Can influence output | Can appear in final prose | Allowed transformation |
 | --- | --- | --- | --- | --- |
 | `empirical_evidence` | `empirical` | yes | yes | `claim_or_citation` |
-| `user_feedback` | `synthesised` | yes | no | `derived_requirement` |
+| `instruction` | `process` | yes | no | `derived_requirement` |
 | `style_signal` | `synthesised` | yes | no | `style_rule` |
+| `user_feedback` | `synthesised` | yes | no | `derived_requirement` |
 | `prior_artefact` | `process` | yes | no | `derived_requirement` |
+| `process_history` | `process` | yes | no | `derived_requirement` |
 | `operational_trace` | `process` | no | no | `audit_record` |
-| `private_reasoning` | `excluded` | no | no | `none` |
+| `review_finding` | `synthesised` | yes | no | `applied_recommendation` |
+| `validation_rule` | `process` | yes | no | `boundary_rule` |
 | `synthesised_judgement` | `synthesised` | yes | no | `derived_requirement` |
+| `private_reasoning` | `excluded` | no | no | `none` |
 
-The table is a policy surface. Future versions may add richer types, but the
-current repo should not be described as a complete ontology.
+The table is a policy surface. SPEC-L1-S005 review-role gating threads
+the `source_agent` keyword through `classify_context()` so a
+`policy-red-team` review item stays a `review_finding` rather than
+being demoted into `user_feedback`. Future versions may refine these
+types; the eleven-class set is the v0.9 canonical surface.
 
 ## Allowed Transformations
 
@@ -57,6 +67,14 @@ and tone without being announced to the reader.
 
 `audit_record` means the material can be retained for traceability but should
 not shape or appear in final prose.
+
+`applied_recommendation` means a review finding may be applied as a revision
+instruction by a revision planner; the recommendation itself does not appear
+in final prose.
+
+`boundary_rule` means a validation rule informs the prose-boundary gate (for
+example, by extending the banned-residue list) but the rule text never
+appears in final prose.
 
 `none` means the material is excluded from generation.
 

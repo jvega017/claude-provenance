@@ -1,21 +1,20 @@
 # Quickstart
 
-Five minutes from `pip install` to a working verdict.
+Five minutes from a fresh clone to a working verdict.
 
 ## Install
 
-```bash
-pip install claude-provenance
-```
-
-Core install has **zero third-party dependencies**. Stdlib only.
-
-Optional MCP transport (only needed for Claude Code / Claude Desktop
-integration; the Python API and CLI work without it):
+`claude-provenance` is not yet on PyPI. Install from source until the first published release lands:
 
 ```bash
-pip install "claude-provenance[mcp]"
+git clone https://github.com/jvega017/claude-provenance.git
+cd claude-provenance
+python -m pip install -e ".[mcp]"
 ```
+
+Core install has **zero third-party dependencies**. Stdlib only. The `[mcp]` extra pulls in the optional `mcp` SDK; it is only needed for Claude Code / Claude Desktop integration. The Python API and CLI work without it.
+
+> When the package is published, `pip install claude-provenance` will work. Until then, the source-checkout path above is the supported install.
 
 ## Verify the install
 
@@ -23,8 +22,7 @@ pip install "claude-provenance[mcp]"
 warrantos --help
 ```
 
-Should print the help for the integration CLI. If you prefer running
-without installing, every entry point also works as a module:
+Should print the help for the integration CLI. If you prefer running without installing, every entry point also works as a module:
 
 ```bash
 python -m cli.warrantos_cli --help
@@ -32,10 +30,9 @@ python -m cli.warrantos_cli --help
 
 ## Run the bundled demo
 
-```bash
-git clone https://github.com/jvega017/claude-provenance.git
-cd claude-provenance
+You are already in the cloned repo from the install step. Run:
 
+```bash
 warrantos check examples/quickstart-demo/draft.md \
   --context examples/quickstart-demo/context.json \
   --actor-identity examples/quickstart-demo/actor.json \
@@ -43,13 +40,17 @@ warrantos check examples/quickstart-demo/draft.md \
 ```
 
 Expected verdict: **`HOLD`** with one unsupported load-bearing claim.
-The demo is wired so every layer fires at least once. See
+The bundled command exercises Layer 1, Layer 4, Layer 7 G1, Layer 7
+G2 (detection), CBOM assembly, and the four-state verdict
+consolidator. Add `--verify` to run the G2 verifier and
+`--writer-model`/`--verifier-model` to run G3; G4 and G5 ship as
+STARTER and are not exercised by the bundled demo. See
 [`examples/quickstart-demo/README.md`](../examples/quickstart-demo/README.md)
 for the explanation of each line of output.
 
 ## What just happened
 
-The CLI ran your draft through every layer of the WarrantOS pipeline:
+The CLI ran your draft through these layers of the WarrantOS pipeline:
 
 1. **Layer 1** classified the three context items into eleven canonical
    classes. The `policy-red-team` review finding was forced to
@@ -106,7 +107,7 @@ guarantees three operational properties:
    (SPEC-L8-S005).
 
 The remaining failure modes are addressed by human review and the
-six-paper coupling thesis documented in
+WarrantOS coupling thesis summarised in
 [`docs/OVERVIEW.md`](OVERVIEW.md). Treat this tool as the operational
 form of that thesis, not as a correctness oracle.
 
@@ -117,8 +118,8 @@ form of that thesis, not as a correctness oracle.
 - **Adding the MCP server to Claude Code / Claude Desktop**:
   [`docs/MCP-CONFIG.md`](MCP-CONFIG.md)
 - **Verifying claims without an Anthropic API key**:
-  [`docs/NO-API-KEY.md`](NO-API-KEY.md) — local LLM, Claude Code
-  hook, or MCP sampling (v0.9).
+  [`docs/NO-API-KEY.md`](NO-API-KEY.md): local LLM, Claude Code
+  hook, or MCP sampling (deferred to v0.10).
 - **Keeping API costs predictable**:
   [`docs/COST.md`](COST.md)
 - **What gates exist and how to extend them**:
